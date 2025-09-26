@@ -1,0 +1,621 @@
+/*Install-Package Microsoft.EntityFrameworkCore -Version 6.0.0
+Install-Package Microsoft.EntityFrameworkCore.SqlServer -Version 6.0.0
+Install-Package Microsoft.EntityFrameworkCore.Tools -Version 6.0.0
+Install-Package Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation -Version 6.0.0
+Add-Migration InitialCreate
+Update-Database
+
+
+
+/*apsetting.json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Server=YOUR_SQL_SERVER;Database=WAD_Exam09;Trusted_Connection=True;MultipleActiveResultSets=true"
+  }
+}
+
+
+/*Models/Course.cs:
+
+using System.ComponentModel.DataAnnotations;
+using System.Collections.Generic;
+
+namespace WADExam.Models
+{
+    public class Course
+    {
+        public int Id { get; set; }
+
+        [Required]
+        [StringLength(255, MinimumLength = 5)]
+        public string Title { get; set; }
+
+        [Required]
+        [Range(1,5)]
+        public int Credits { get; set; }
+
+        public string? Department { get; set; }
+
+        // Navigation
+        public ICollection<Enrollment>? Enrollments { get; set; }
+    }
+}
+
+/*Models/Enrollment.cs:
+
+using System;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace WADExam.Models
+{
+    public class Enrollment
+    {
+        public int Id { get; set; }
+
+        [Required]
+        public DateTime EnrollmentDate { get; set; }
+
+        [Required]
+        [StringLength(100, MinimumLength = 3)]
+        public string StudentName { get; set; }
+
+        [Required]
+        [EmailAddress]
+        public string StudentEmail { get; set; }
+
+        // Foreign key
+        [Required]
+        public int CourseId { get; set; }
+
+        [ForeignKey(nameof(CourseId))]
+        public Course? Course { get; set; }
+
+        [Range(0.0, 4.0)]
+        public decimal? Grade { get; set; }
+    }
+}
+
+/*Data/ApplicationDbContext.cs:
+
+using Microsoft.EntityFrameworkCore;
+using WADExam.Models;
+
+namespace WADExam.Data
+{
+    public class ApplicationDbContext : DbContext
+    {
+        public ApplicationDbContext(DbContextOptions options) : base(options)
+        {
+        }
+
+        public DbSet<Course> Courses { get; set; }
+        public DbSet<Enrollment> Enrollments { get; set; }
+
+        // Optional: Fluent API for constraints (not required because we used Data Annotations)
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            base.OnModelCreating(modelBuilder);
+
+            // Example: ensure Title is required and max length enforced (already via attributes)
+            modelBuilder.Entity<Course>().Property(c => c.Title).IsRequired().HasMaxLength(255);
+            modelBuilder.Entity<Enrollment>().Property(e => e.StudentEmail).IsRequired();
+        }
+    }
+}
+
+/*Program.cs
+using Microsoft.EntityFrameworkCore;
+using WADExam.Data;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services
+builder.Services.AddControllersWithViews()
+    .AddRazorRuntimeCompilation(); // optional
+
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+var app = builder.Build();
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Home/Error");
+    app.UseHsts();
+}
+app.UseHttpsRedirection();
+app.UseStaticFiles();
+app.UseRouting();
+app.UseAuthorization();
+
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Courses}/{action=Index}/{id?}");
+
+app.Run();
+
+
+/*Controllers/CoursesController.cs:
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using WADExam.Data;
+using WADExam.Models;
+using System.Threading.Tasks;
+using System.Linq;
+
+namespace WADExam.Controllers
+{
+    public class CoursesController : Controller
+    {
+        private readonly ApplicationDbContext _db;
+        private const int PageSize = 10; // 10 courses per page
+
+        public CoursesController(ApplicationDbContext db)
+        {
+            _db = db;
+        }
+
+        // GET: /Courses
+        // displays courses with pagination, sorting, filtering and optional search
+        public async Task<IActionResult> Index(string sortOrder, int page = 1, int? creditsFilter = null, string? searchTerm = null)
+        {
+            // Sorting parameters
+            ViewData["TitleSortParm"] = string.IsNullOrEmpty(sortOrder) ? "title_desc" : "";
+            ViewData["CreditsSortParm"] = sortOrder == "credits" ? "credits_desc" : "credits";
+            ViewData["DeptSortParm"] = sortOrder == "dept" ? "dept_desc" : "dept";
+
+            // Persist filter/search so the view can keep form values
+            ViewData["CurrentCreditsFilter"] = creditsFilter;
+            ViewData["CurrentSearchTerm"] = searchTerm;
+
+            var query = _db.Courses.AsQueryable();
+
+            // Filter by credits (e.g., show courses with more than X credits)
+            if (creditsFilter.HasValue)
+            {
+                // Filter courses with credits greater than the provided number
+                query = query.Where(c => c.Credits > creditsFilter.Value);
+            }
+
+            // Search by title (case-insensitive)
+            if (!string.IsNullOrEmpty(searchTerm))
+            {
+                query = query.Where(c => EF.Functions.Like(c.Title, $"%{searchTerm}%"));
+            }
+
+            // Sorting
+            query = sortOrder switch
+            {
+                "title_desc" => query.OrderByDescending(c => c.Title),
+                "credits" => query.OrderBy(c => c.Credits),
+                "credits_desc" => query.OrderByDescending(c => c.Credits),
+                "dept" => query.OrderBy(c => c.Department),
+                "dept_desc" => query.OrderByDescending(c => c.Department),
+                _ => query.OrderBy(c => c.Title)
+            };
+
+            // Pagination
+            var totalItems = await query.CountAsync();
+            var totalPages = (int)System.Math.Ceiling(totalItems / (double)PageSize);
+
+            var courses = await query
+                .Skip((page - 1) * PageSize)
+                .Take(PageSize)
+                .ToListAsync();
+
+            ViewData["CurrentPage"] = page;
+            ViewData["TotalPages"] = totalPages;
+
+            return View(courses);
+        }
+
+        // GET: /Courses/Details/5
+        public async Task<IActionResult> Details(int id)
+        {
+            var course = await _db.Courses.Include(c => c.Enrollments).FirstOrDefaultAsync(c => c.Id == id);
+            if (course == null) return NotFound();
+            return View(course);
+        }
+
+        // GET: /Courses/Create (optional for admin)
+        public IActionResult Create() => View();
+
+        // POST: /Courses/Create
+        [HttpPost, ValidateAntiForgeryToken]
+        public async Task<IActionResult> Create(Course model)
+        {
+            if (ModelState.IsValid)
+            {
+                _db.Courses.Add(model);
+                await _db.SaveChangesAsync();
+                return RedirectToAction(nameof(Index));
+            }
+            return View(model);
+        }
+
+        // GET/Edit/Delete for Courses can be added similarly if needed
+    }
+}
+
+/*Controllers/EnrollmentsController.cs:
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using WADExam.Data;
+using WADExam.Models;
+using System.Threading.Tasks;
+using System.Linq;
+
+namespace WADExam.Controllers
+{
+    public class EnrollmentsController : Controller
+    {
+        private readonly ApplicationDbContext _db;
+
+        public EnrollmentsController(ApplicationDbContext db)
+        {
+            _db = db;
+        }
+
+        // GET: Enrollments/Create
+        public async Task<IActionResult> Create()
+        {
+            ViewData["Courses"] = await _db.Courses.OrderBy(c => c.Title).ToListAsync();
+            return View();
+        }
+
+        // POST: Enrollments/Create
+        [HttpPost, ValidateAntiForgeryToken]
+        public async Task<IActionResult> Create(Enrollment model)
+        {
+            if (ModelState.IsValid)
+            {
+                _db.Enrollments.Add(model);
+                await _db.SaveChangesAsync();
+                return RedirectToAction("Index", "Courses");
+            }
+
+            ViewData["Courses"] = await _db.Courses.OrderBy(c => c.Title).ToListAsync();
+            return View(model);
+        }
+
+        // GET: Enrollments/Edit/5
+        public async Task<IActionResult> Edit(int id)
+        {
+            var enrollment = await _db.Enrollments.FindAsync(id);
+            if (enrollment == null) return NotFound();
+
+            ViewData["Courses"] = await _db.Courses.OrderBy(c => c.Title).ToListAsync();
+            return View(enrollment);
+        }
+
+        // POST: Enrollments/Edit/5
+        [HttpPost, ValidateAntiForgeryToken]
+        public async Task<IActionResult> Edit(int id, Enrollment model)
+        {
+            if (id != model.Id) return BadRequest();
+
+            if (ModelState.IsValid)
+            {
+                try
+                {
+                    _db.Update(model);
+                    await _db.SaveChangesAsync();
+                    return RedirectToAction("Details", "Courses", new { id = model.CourseId });
+                }
+                catch (DbUpdateConcurrencyException)
+                {
+                    if (!await _db.Enrollments.AnyAsync(e => e.Id == id)) return NotFound();
+                    throw;
+                }
+            }
+
+            ViewData["Courses"] = await _db.Courses.OrderBy(c => c.Title).ToListAsync();
+            return View(model);
+        }
+
+        // GET: Enrollments/Delete/5  -> show confirmation
+        public async Task<IActionResult> Delete(int id)
+        {
+            var enrollment = await _db.Enrollments.Include(e => e.Course).FirstOrDefaultAsync(e => e.Id == id);
+            if (enrollment == null) return NotFound();
+            return View(enrollment);
+        }
+
+        // POST: Enrollments/Delete/5 -> actually delete
+        [HttpPost, ActionName("Delete"), ValidateAntiForgeryToken]
+        public async Task<IActionResult> DeleteConfirmed(int id)
+        {
+            var enrollment = await _db.Enrollments.FindAsync(id);
+            if (enrollment == null) return NotFound();
+
+            _db.Enrollments.Remove(enrollment);
+            await _db.SaveChangesAsync();
+            return RedirectToAction("Details", "Courses", new { id = enrollment.CourseId });
+        }
+
+        // Optional: Index of all enrollments
+        public async Task<IActionResult> Index()
+        {
+            var list = await _db.Enrollments.Include(e => e.Course).OrderByDescending(e => e.EnrollmentDate).ToListAsync();
+            return View(list);
+        }
+    }
+}
+
+/*Views/Courses/Index.cshtml
+@model IEnumerable<WADExam.Models.Course>
+@{
+    ViewData["Title"] = "Courses";
+    var currentPage = (int)(ViewData["CurrentPage"] ?? 1);
+    var totalPages = (int)(ViewData["TotalPages"] ?? 1);
+    var currentCreditsFilter = ViewData["CurrentCreditsFilter"] as int?;
+    var currentSearch = ViewData["CurrentSearchTerm"] as string;
+}
+
+<h1>Courses</h1>
+
+<form method="post" asp-action="Index" asp-controller="Courses" class="row g-2 mb-3">
+    <div class="col-auto">
+        <input name="searchTerm" class="form-control" placeholder="Search by title..." value="@currentSearch" />
+    </div>
+    <div class="col-auto">
+        <select name="creditsFilter" class="form-select">
+            <option value="">All credits</option>
+            <option value="1" @(currentCreditsFilter==1 ? "selected" : "")>More than 1</option>
+            <option value="2" @(currentCreditsFilter==2 ? "selected" : "")>More than 2</option>
+            <option value="3" @(currentCreditsFilter==3 ? "selected" : "")>More than 3</option>
+        </select>
+    </div>
+    <div class="col-auto">
+        <button type="submit" class="btn btn-primary">Filter/Search</button>
+    </div>
+</form>
+
+<table class="table table-striped">
+    <thead>
+        <tr>
+            <th>
+                <a asp-action="Index" asp-route-sortOrder="@(ViewData["TitleSortParm"])"
+                   asp-route-page="1">Title</a>
+            </th>
+            <th>
+                <a asp-action="Index" asp-route-sortOrder="@(ViewData["CreditsSortParm"])"
+                   asp-route-page="1">Credits</a>
+            </th>
+            <th>
+                <a asp-action="Index" asp-route-sortOrder="@(ViewData["DeptSortParm"])"
+                   asp-route-page="1">Department</a>
+            </th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+    @foreach (var item in Model)
+    {
+        <tr>
+            <td>@item.Title</td>
+            <td>@item.Credits</td>
+            <td>@item.Department</td>
+            <td>
+                <a asp-action="Details" asp-route-id="@item.Id" class="btn btn-sm btn-info">Details</a>
+            </td>
+        </tr>
+    }
+    </tbody>
+</table>
+
+<!-- Paging bar -->
+<nav>
+    <ul class="pagination">
+        <li class="page-item @(currentPage==1? "disabled":"")">
+            <a class="page-link" asp-action="Index" asp-route-page="1" asp-route-sortOrder="@ViewContext.HttpContext.Request.Query["sortOrder"]">« First</a>
+        </li>
+
+        @for (int p = 1; p <= totalPages; p++)
+        {
+            <li class="page-item @(p==currentPage? "active":"")">
+                <a class="page-link" asp-action="Index" asp-route-page="@p" asp-route-sortOrder="@ViewContext.HttpContext.Request.Query["sortOrder"]">@p</a>
+            </li>
+        }
+
+        <li class="page-item @(currentPage==totalPages? "disabled":"")">
+            <a class="page-link" asp-action="Index" asp-route-page="@totalPages" asp-route-sortOrder="@ViewContext.HttpContext.Request.Query["sortOrder"]">Last »</a>
+        </li>
+    </ul>
+</nav>
+
+<p>
+    <a asp-controller="Enrollments" asp-action="Create" class="btn btn-success">Add Enrollment</a>
+</p>
+
+/*Views/Courses/Details.cshtml (brief)
+@model WADExam.Models.Course
+@{
+    ViewData["Title"] = "Course Details";
+}
+<h1>@Model.Title</h1>
+<p><strong>Credits:</strong> @Model.Credits</p>
+<p><strong>Department:</strong> @Model.Department</p>
+
+<h3>Enrollments</h3>
+@if (Model.Enrollments != null && Model.Enrollments.Any())
+{
+    <table class="table">
+        <thead><tr><th>Name</th><th>Email</th><th>Date</th><th>Grade</th><th></th></tr></thead>
+        <tbody>
+        @foreach(var e in Model.Enrollments)
+        {
+            <tr>
+                <td>@e.StudentName</td>
+                <td>@e.StudentEmail</td>
+                <td>@e.EnrollmentDate.ToShortDateString()</td>
+                <td>@(e.Grade?.ToString("0.00") ?? "-")</td>
+                <td>
+                    <a asp-controller="Enrollments" asp-action="Edit" asp-route-id="@e.Id" class="btn btn-sm btn-primary">Edit</a>
+                    <a asp-controller="Enrollments" asp-action="Delete" asp-route-id="@e.Id" class="btn btn-sm btn-danger">Delete</a>
+                </td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}
+else
+{
+    <p>No enrollments yet.</p>
+}
+
+/*Views/Enrollments/Create.cshtml
+@model WADExam.Models.Enrollment
+@{
+    ViewData["Title"] = "Create Enrollment";
+    var courses = ViewData["Courses"] as List<WADExam.Models.Course>;
+}
+
+<h1>Create Enrollment</h1>
+
+<form asp-action="Create" method="post">
+    <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+
+    <div class="mb-3">
+        <label asp-for="StudentName" class="form-label"></label>
+        <input asp-for="StudentName" class="form-control" />
+        <span asp-validation-for="StudentName" class="text-danger"></span>
+    </div>
+
+    <div class="mb-3">
+        <label asp-for="StudentEmail" class="form-label"></label>
+        <input asp-for="StudentEmail" class="form-control" />
+        <span asp-validation-for="StudentEmail" class="text-danger"></span>
+    </div>
+
+    <div class="mb-3">
+        <label asp-for="EnrollmentDate" class="form-label"></label>
+        <input asp-for="EnrollmentDate" type="date" class="form-control" value="@DateTime.Now.ToString("yyyy-MM-dd")" />
+        <span asp-validation-for="EnrollmentDate" class="text-danger"></span>
+    </div>
+
+    <div class="mb-3">
+        <label asp-for="CourseId" class="form-label">Course</label>
+        <select asp-for="CourseId" class="form-select" asp-items="@(new Microsoft.AspNetCore.Mvc.Rendering.SelectList(courses, "Id", "Title"))">
+            <option value="">-- Select course --</option>
+        </select>
+        <span asp-validation-for="CourseId" class="text-danger"></span>
+    </div>
+
+    <div class="mb-3">
+        <label asp-for="Grade" class="form-label"></label>
+        <input asp-for="Grade" class="form-control" />
+        <span asp-validation-for="Grade" class="text-danger"></span>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Save</button>
+    <a asp-controller="Courses" asp-action="Index" class="btn btn-secondary">Back</a>
+</form>
+
+@section Scripts {
+    <partial name="_ValidationScriptsPartial" />
+}
+
+/*Views/Enrollments/Edit.cshtml
+@model WADExam.Models.Enrollment
+@{
+    ViewData["Title"] = "Edit Enrollment";
+    var courses = ViewData["Courses"] as List<WADExam.Models.Course>;
+}
+
+<h1>Edit Enrollment</h1>
+
+<form asp-action="Edit" method="post">
+    <input type="hidden" asp-for="Id" />
+    <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+
+    <div class="mb-3">
+        <label asp-for="StudentName" class="form-label"></label>
+        <input asp-for="StudentName" class="form-control" />
+        <span asp-validation-for="StudentName" class="text-danger"></span>
+    </div>
+
+    <div class="mb-3">
+        <label asp-for="StudentEmail" class="form-label"></label>
+        <input asp-for="StudentEmail" class="form-control" />
+        <span asp-validation-for="StudentEmail" class="text-danger"></span>
+    </div>
+
+    <div class="mb-3">
+        <label asp-for="EnrollmentDate" class="form-label"></label>
+        <input asp-for="EnrollmentDate" type="date" class="form-control" />
+        <span asp-validation-for="EnrollmentDate" class="text-danger"></span>
+    </div>
+
+    <div class="mb-3">
+        <label asp-for="CourseId" class="form-label">Course</label>
+        <select asp-for="CourseId" class="form-select" asp-items="@(new Microsoft.AspNetCore.Mvc.Rendering.SelectList(courses, "Id", "Title", Model.CourseId))">
+            <option value="">-- Select course --</option>
+        </select>
+        <span asp-validation-for="CourseId" class="text-danger"></span>
+    </div>
+
+    <div class="mb-3">
+        <label asp-for="Grade" class="form-label"></label>
+        <input asp-for="Grade" class="form-control" />
+        <span asp-validation-for="Grade" class="text-danger"></span>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Save</button>
+    <a asp-controller="Courses" asp-action="Index" class="btn btn-secondary">Back</a>
+</form>
+
+@section Scripts {
+    <partial name="_ValidationScriptsPartial" />
+}
+
+
+/*Views/Enrollments/Delete.cshtml
+@model WADExam.Models.Enrollment
+@{
+    ViewData["Title"] = "Delete Enrollment";
+}
+
+<h1>Delete Enrollment</h1>
+
+<div class="alert alert-warning">
+    <p>Are you sure you want to delete this enrollment?</p>
+</div>
+
+<dl class="row">
+    <dt class="col-sm-2">Student</dt>
+    <dd class="col-sm-10">@Model.StudentName (@Model.StudentEmail)</dd>
+
+    <dt class="col-sm-2">Course</dt>
+    <dd class="col-sm-10">@Model.Course?.Title</dd>
+
+    <dt class="col-sm-2">Enrollment date</dt>
+    <dd class="col-sm-10">@Model.EnrollmentDate.ToShortDateString()</dd>
+</dl>
+
+<form asp-action="Delete" method="post">
+    <input type="hidden" asp-for="Id" />
+    <button type="submit" class="btn btn-danger">Yes — Delete</button>
+    <a asp-controller="Courses" asp-action="Index" class="btn btn-secondary">Cancel</a>
+</form>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
